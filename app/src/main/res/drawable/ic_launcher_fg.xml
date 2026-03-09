@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background lingkaran putih -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,20 A34,34 0 1,1 53.99,20 Z" />
+    <!-- Huruf E -->
+    <path
+        android:fillColor="@color/primary"
+        android:pathData="M38,32 L70,32 L70,40 L46,40 L46,50 L66,50 L66,58 L46,58 L46,68 L70,68 L70,76 L38,76 Z" />
+</vector>
