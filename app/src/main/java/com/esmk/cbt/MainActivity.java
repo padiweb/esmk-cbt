@@ -2,9 +2,14 @@ package com.esmk.cbt;
 
 import android.annotation.SuppressLint;
 import android.app.AlertDialog;
+import android.app.NotificationManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.media.AudioManager;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -34,6 +39,8 @@ public class MainActivity extends AppCompatActivity {
     private String serverUrl;
     private final Handler handler = new Handler();
     private Runnable immersiveRunnable;
+    private BroadcastReceiver violationReceiver;
+    private boolean isExamActive = false;
 
     private static final String DEFAULT_PIN = "1234";
     private int backPressCount = 0;
@@ -44,15 +51,20 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // ── Fullscreen sebelum setContentView ──────────────────
         requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        // ── FLAG_SECURE: Blokir screenshot & screen recording ───
+        // Ini yang paling penting — layar akan hitam saat di-screenshot
+        // atau saat di-record oleh aplikasi manapun
         getWindow().setFlags(
             WindowManager.LayoutParams.FLAG_FULLSCREEN |
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
+            WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_FULLSCREEN |
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
+            WindowManager.LayoutParams.FLAG_SECURE
         );
 
         setContentView(R.layout.activity_main);
@@ -65,10 +77,18 @@ public class MainActivity extends AppCompatActivity {
         serverUrl = prefs.getString("server_url", "");
 
         hideSystemUI();
+        startImmersivePolling();
+        registerViolationReceiver();
+        startGuardService();
+        muteNotifications();
+        setupWebView();
+        loadUrl();
 
-        // ── POLLING IMMERSIVE — paksa setiap 500ms ─────────────
-        // Ini yang paling penting: navigation bar yang muncul karena
-        // gesture/swipe akan langsung disembunyikan kembali dalam 500ms
+        isExamActive = true;
+    }
+
+    // ── IMMERSIVE POLLING ────────────────────────────────────────
+    private void startImmersivePolling() {
         immersiveRunnable = new Runnable() {
             @Override
             public void run() {
@@ -77,28 +97,22 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         handler.postDelayed(immersiveRunnable, 500);
-
-        setupWebView();
-        loadUrl();
     }
 
-    // ── IMMERSIVE MODE ──────────────────────────────────────────
     private void hideSystemUI() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ (API 30+)
             WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-            WindowInsetsControllerCompat controller =
+            WindowInsetsControllerCompat ctrl =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-            if (controller != null) {
-                controller.hide(WindowInsetsCompat.Type.systemBars());
-                controller.hide(WindowInsetsCompat.Type.navigationBars());
-                controller.hide(WindowInsetsCompat.Type.statusBars());
-                controller.setSystemBarsBehavior(
+            if (ctrl != null) {
+                ctrl.hide(WindowInsetsCompat.Type.systemBars());
+                ctrl.hide(WindowInsetsCompat.Type.navigationBars());
+                ctrl.hide(WindowInsetsCompat.Type.statusBars());
+                ctrl.setSystemBarsBehavior(
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 );
             }
         } else {
-            // Android 8-10
             getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -107,6 +121,83 @@ public class MainActivity extends AppCompatActivity {
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_FULLSCREEN
             );
+        }
+    }
+
+    // ── GUARD SERVICE ────────────────────────────────────────────
+    private void startGuardService() {
+        Intent serviceIntent = new Intent(this, GuardService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+    }
+
+    private void stopGuardService() {
+        stopService(new Intent(this, GuardService.class));
+    }
+
+    // ── VIOLATION RECEIVER ───────────────────────────────────────
+    // Menerima broadcast dari GuardService saat ada pelanggaran
+    private void registerViolationReceiver() {
+        violationReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String reason = intent.getStringExtra("reason");
+                if (reason != null) {
+                    // Kirim ke web ujian sebagai pelanggaran
+                    reportViolationToWeb(reason);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter("com.esmk.cbt.VIOLATION");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(violationReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(violationReceiver, filter);
+        }
+    }
+
+    // Injeksi JavaScript ke WebView untuk melaporkan pelanggaran ke server
+    private void reportViolationToWeb(String reason) {
+        if (webView == null || !isExamActive) return;
+        String safeReason = reason.replace("'", "\\'").replace("\n", " ");
+        String js = "javascript:(function(){" +
+            "if(typeof triggerViolation === 'function'){" +
+            "  triggerViolation('" + safeReason + "');" +
+            "}" +
+            "})();";
+        runOnUiThread(() -> webView.loadUrl(js));
+    }
+
+    // ── MUTE NOTIFIKASI ──────────────────────────────────────────
+    private void muteNotifications() {
+        try {
+            NotificationManager nm =
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null && nm.isNotificationPolicyAccessGranted()) {
+                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE);
+            }
+            // Matikan suara & getar
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                am.setRingerMode(AudioManager.RINGER_MODE_SILENT);
+            }
+        } catch (Exception e) {
+            // Ignore jika tidak ada izin
+        }
+    }
+
+    private void restoreNotifications() {
+        try {
+            NotificationManager nm =
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null && nm.isNotificationPolicyAccessGranted()) {
+                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL);
+            }
+        } catch (Exception e) {
+            // Ignore
         }
     }
 
@@ -121,7 +212,6 @@ public class MainActivity extends AppCompatActivity {
         ws.setBuiltInZoomControls(false);
         ws.setDisplayZoomControls(false);
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-        // Penanda APK — dibaca oleh ujian.php untuk skip fullscreen gate
         ws.setUserAgentString(ws.getUserAgentString() + " ESMK-CBT/1.0");
 
         webView.setWebViewClient(new WebViewClient() {
@@ -131,7 +221,7 @@ public class MainActivity extends AppCompatActivity {
                 if (url.startsWith(serverUrl) || url.startsWith(getDomain(serverUrl))) {
                     return false;
                 }
-                return true; // Blokir URL luar domain
+                return true;
             }
 
             @Override
@@ -143,7 +233,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
-                hideSystemUI(); // Pulihkan immersive setelah halaman load
+                hideSystemUI();
             }
 
             @Override
@@ -154,7 +244,8 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+            public void onReceivedSslError(WebView view, SslErrorHandler handler,
+                                           SslError error) {
                 handler.proceed();
             }
         });
@@ -176,7 +267,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void showError() {
         tvError.setVisibility(View.VISIBLE);
-        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\nPastikan:\n• HP terhubung ke jaringan sekolah\n• Server ujian aktif\n\nKetuk 5x untuk coba lagi.");
+        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\n" +
+            "Pastikan:\n• HP terhubung ke jaringan sekolah\n• Server ujian aktif\n\n" +
+            "Ketuk 5x untuk coba lagi.");
         final int[] tapCount = {0};
         final long[] lastTap = {0};
         tvError.setOnClickListener(v -> {
@@ -187,7 +280,18 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ── BLOKIR SEMUA TOMBOL FISIK & SISTEM ─────────────────────
+    // ── DETEKSI KELUAR HALAMAN (onPause) ─────────────────────────
+    // Dipanggil saat: Home ditekan, Recent Apps, notifikasi, dll
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (isExamActive) {
+            // Laporkan pelanggaran ke web
+            reportViolationToWeb("Keluar Halaman Ujian (Tombol Home/Recent)");
+        }
+    }
+
+    // ── TOMBOL FISIK ─────────────────────────────────────────────
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         switch (keyCode) {
@@ -204,7 +308,8 @@ public class MainActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_VOLUME_DOWN:
             case KeyEvent.KEYCODE_CAMERA:
             case KeyEvent.KEYCODE_FOCUS:
-                return true; // Blokir semua
+            case KeyEvent.KEYCODE_POWER:
+                return true;
             default:
                 return super.onKeyDown(keyCode, event);
         }
@@ -246,8 +351,7 @@ public class MainActivity extends AppCompatActivity {
             .setPositiveButton("Masuk", (dialog, which) -> {
                 String pin = input.getText().toString();
                 SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
-                String savedPin = prefs.getString("admin_pin", DEFAULT_PIN);
-                if (pin.equals(savedPin)) {
+                if (pin.equals(prefs.getString("admin_pin", DEFAULT_PIN))) {
                     showAdminMenu();
                 } else {
                     new AlertDialog.Builder(this)
@@ -270,13 +374,20 @@ public class MainActivity extends AppCompatActivity {
             .setItems(menu, (dialog, which) -> {
                 switch (which) {
                     case 0:
-                        startActivity(new Intent(this, SettingsActivity.class)); break;
+                        isExamActive = false;
+                        startActivity(new Intent(this, SettingsActivity.class));
+                        break;
                     case 1:
-                        webView.reload(); break;
+                        webView.reload();
+                        break;
                     case 2:
+                        isExamActive = false;
+                        restoreNotifications();
+                        stopGuardService();
                         handler.removeCallbacks(immersiveRunnable);
                         finishAffinity();
-                        System.exit(0); break;
+                        System.exit(0);
+                        break;
                 }
             }).show();
     }
@@ -294,12 +405,17 @@ public class MainActivity extends AppCompatActivity {
         hideSystemUI();
         handler.removeCallbacks(immersiveRunnable);
         handler.postDelayed(immersiveRunnable, 500);
+        isExamActive = true;
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        isExamActive = false;
         handler.removeCallbacks(immersiveRunnable);
+        try {
+            unregisterReceiver(violationReceiver);
+        } catch (Exception e) { /* ignore */ }
         if (webView != null) webView.destroy();
     }
 
