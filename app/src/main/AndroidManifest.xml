@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Akses internet untuk WebView -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Cegah HP sleep saat ujian -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Deteksi aplikasi lain yang muncul -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Blokir aplikasi mengambang (floating window / AI overlay) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/Theme.ESMK"
         android:usesCleartextTraffic="true"
