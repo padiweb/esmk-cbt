@@ -8,8 +8,10 @@ import android.graphics.Bitmap;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
@@ -20,6 +22,9 @@ import android.webkit.WebViewClient;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -27,9 +32,10 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private TextView tvError;
     private String serverUrl;
+    private final Handler handler = new Handler();
+    private Runnable immersiveRunnable;
 
-    // Kode PIN untuk akses Settings (bisa diubah per deployment)
-    private static final String ADMIN_PIN = "1234";
+    private static final String DEFAULT_PIN = "1234";
     private int backPressCount = 0;
     private long lastBackPress = 0;
 
@@ -38,15 +44,16 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // ── KIOSK: Fullscreen + Keep Screen On ─────────────────
+        // ── Fullscreen sebelum setContentView ──────────────────
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN,
-            WindowManager.LayoutParams.FLAG_FULLSCREEN
+            WindowManager.LayoutParams.FLAG_FULLSCREEN |
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_FULLSCREEN |
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         );
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-        // Sembunyikan navigation bar & status bar (Immersive Sticky)
-        hideSystemUI();
 
         setContentView(R.layout.activity_main);
 
@@ -54,47 +61,77 @@ public class MainActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.progress_bar);
         tvError     = findViewById(R.id.tv_error);
 
-        // Ambil URL dari settings
         SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
         serverUrl = prefs.getString("server_url", "");
+
+        hideSystemUI();
+
+        // ── POLLING IMMERSIVE — paksa setiap 500ms ─────────────
+        // Ini yang paling penting: navigation bar yang muncul karena
+        // gesture/swipe akan langsung disembunyikan kembali dalam 500ms
+        immersiveRunnable = new Runnable() {
+            @Override
+            public void run() {
+                hideSystemUI();
+                handler.postDelayed(this, 500);
+            }
+        };
+        handler.postDelayed(immersiveRunnable, 500);
 
         setupWebView();
         loadUrl();
     }
 
+    // ── IMMERSIVE MODE ──────────────────────────────────────────
+    private void hideSystemUI() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ (API 30+)
+            WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+            WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+            if (controller != null) {
+                controller.hide(WindowInsetsCompat.Type.systemBars());
+                controller.hide(WindowInsetsCompat.Type.navigationBars());
+                controller.hide(WindowInsetsCompat.Type.statusBars());
+                controller.setSystemBarsBehavior(
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                );
+            }
+        } else {
+            // Android 8-10
+            getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+            );
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         WebSettings ws = webView.getSettings();
-
-        // JavaScript & storage
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
         ws.setDatabaseEnabled(true);
-
-        // Tampilan
         ws.setLoadWithOverviewMode(true);
         ws.setUseWideViewPort(true);
         ws.setBuiltInZoomControls(false);
         ws.setDisplayZoomControls(false);
-
-        // Cache
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-
-        // User agent — identifikasi sebagai aplikasi E-SMK
+        // Penanda APK — dibaca oleh ujian.php untuk skip fullscreen gate
         ws.setUserAgentString(ws.getUserAgentString() + " ESMK-CBT/1.0");
 
-        // Blokir navigasi keluar dari domain ujian
         webView.setWebViewClient(new WebViewClient() {
-
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                // Izinkan hanya URL yang masih dalam domain server ujian
                 if (url.startsWith(serverUrl) || url.startsWith(getDomain(serverUrl))) {
-                    return false; // biarkan WebView handle
+                    return false;
                 }
-                // URL di luar domain → blokir
-                return true;
+                return true; // Blokir URL luar domain
             }
 
             @Override
@@ -106,6 +143,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
+                hideSystemUI(); // Pulihkan immersive setelah halaman load
             }
 
             @Override
@@ -117,7 +155,6 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
-                // Untuk server lokal dengan self-signed cert — tetap lanjut
                 handler.proceed();
             }
         });
@@ -132,75 +169,67 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadUrl() {
-        if (serverUrl.isEmpty()) {
-            showError();
-            return;
-        }
+        if (serverUrl.isEmpty()) { showError(); return; }
         tvError.setVisibility(View.GONE);
         webView.loadUrl(serverUrl);
     }
 
     private void showError() {
         tvError.setVisibility(View.VISIBLE);
-        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\nPastikan:\n• HP terhubung ke jaringan sekolah\n• Server ujian aktif\n\nHubungi pengawas atau ketuk 5x untuk coba lagi.");
-        tvError.setOnClickListener(null);
-
-        // Ketuk 5x untuk reload
+        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\nPastikan:\n• HP terhubung ke jaringan sekolah\n• Server ujian aktif\n\nKetuk 5x untuk coba lagi.");
         final int[] tapCount = {0};
         final long[] lastTap = {0};
         tvError.setOnClickListener(v -> {
             long now = System.currentTimeMillis();
-            if (now - lastTap[0] < 1000) {
-                tapCount[0]++;
-            } else {
-                tapCount[0] = 1;
-            }
+            tapCount[0] = (now - lastTap[0] < 1000) ? tapCount[0] + 1 : 1;
             lastTap[0] = now;
-            if (tapCount[0] >= 5) {
-                tapCount[0] = 0;
-                loadUrl();
-            }
+            if (tapCount[0] >= 5) { tapCount[0] = 0; loadUrl(); }
         });
     }
 
-    // ── KIOSK: Blokir semua tombol fisik ───────────────────────
+    // ── BLOKIR SEMUA TOMBOL FISIK & SISTEM ─────────────────────
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_BACK:
-                // Tombol Back: jika siswa tekan 5x berturut-turut dalam 3 detik
-                // → tampilkan dialog PIN untuk pengawas akses Settings
                 handleBackPress();
                 return true;
-
             case KeyEvent.KEYCODE_HOME:
-            case KeyEvent.KEYCODE_APP_SWITCH:  // Recents/Multitasking
+            case KeyEvent.KEYCODE_APP_SWITCH:
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_SEARCH:
+            case KeyEvent.KEYCODE_ASSIST:
+            case KeyEvent.KEYCODE_VOICE_ASSIST:
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
-            case KeyEvent.KEYCODE_POWER:
-                // Blokir semua tombol sistem
-                return true;
-
+            case KeyEvent.KEYCODE_CAMERA:
+            case KeyEvent.KEYCODE_FOCUS:
+                return true; // Blokir semua
             default:
                 return super.onKeyDown(keyCode, event);
         }
     }
 
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_HOME:
+            case KeyEvent.KEYCODE_APP_SWITCH:
+            case KeyEvent.KEYCODE_MENU:
+            case KeyEvent.KEYCODE_SEARCH:
+            case KeyEvent.KEYCODE_ASSIST:
+            case KeyEvent.KEYCODE_VOICE_ASSIST:
+                return true;
+            default:
+                return super.onKeyUp(keyCode, event);
+        }
+    }
+
     private void handleBackPress() {
         long now = System.currentTimeMillis();
-        if (now - lastBackPress < 3000) {
-            backPressCount++;
-        } else {
-            backPressCount = 1;
-        }
+        backPressCount = (now - lastBackPress < 3000) ? backPressCount + 1 : 1;
         lastBackPress = now;
-
-        if (backPressCount >= 5) {
-            backPressCount = 0;
-            showAdminPinDialog();
-        }
+        if (backPressCount >= 5) { backPressCount = 0; showAdminPinDialog(); }
     }
 
     private void showAdminPinDialog() {
@@ -208,104 +237,88 @@ public class MainActivity extends AppCompatActivity {
         input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER |
                            android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         input.setHint("Masukkan PIN Pengawas");
+        input.setPadding(40, 20, 40, 20);
 
         new AlertDialog.Builder(this)
             .setTitle("🔐 Akses Pengawas")
-            .setMessage("Masukkan PIN untuk keluar atau mengubah pengaturan.")
+            .setMessage("Masukkan PIN untuk mengakses menu pengawas.")
             .setView(input)
             .setPositiveButton("Masuk", (dialog, which) -> {
                 String pin = input.getText().toString();
                 SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
-                String savedPin = prefs.getString("admin_pin", ADMIN_PIN);
+                String savedPin = prefs.getString("admin_pin", DEFAULT_PIN);
                 if (pin.equals(savedPin)) {
                     showAdminMenu();
                 } else {
                     new AlertDialog.Builder(this)
                         .setTitle("❌ PIN Salah")
                         .setMessage("PIN tidak sesuai.")
-                        .setPositiveButton("OK", null)
-                        .show();
+                        .setPositiveButton("OK", null).show();
                 }
             })
-            .setNegativeButton("Batal", null)
-            .show();
+            .setNegativeButton("Batal", null).show();
     }
 
     private void showAdminMenu() {
-        String[] menu = {"⚙️ Ubah Pengaturan (URL, Nama, PIN)", "🔄 Reload Halaman", "🚪 Keluar Aplikasi"};
+        String[] menu = {
+            "⚙️ Ubah Pengaturan (URL, Nama, PIN)",
+            "🔄 Reload Halaman",
+            "🚪 Keluar Aplikasi"
+        };
         new AlertDialog.Builder(this)
             .setTitle("Menu Pengawas")
             .setItems(menu, (dialog, which) -> {
                 switch (which) {
                     case 0:
-                        startActivity(new Intent(this, SettingsActivity.class));
-                        break;
+                        startActivity(new Intent(this, SettingsActivity.class)); break;
                     case 1:
-                        webView.reload();
-                        break;
+                        webView.reload(); break;
                     case 2:
+                        handler.removeCallbacks(immersiveRunnable);
                         finishAffinity();
-                        System.exit(0);
-                        break;
+                        System.exit(0); break;
                 }
-            })
-            .show();
+            }).show();
     }
 
-    // ── Immersive Sticky Mode ────────────────────────────────
-    private void hideSystemUI() {
-        View decorView = getWindow().getDecorView();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            getWindow().getInsetsController().hide(
-                android.view.WindowInsets.Type.statusBars() |
-                android.view.WindowInsets.Type.navigationBars()
-            );
-            getWindow().getInsetsController().setSystemBarsBehavior(
-                android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            );
-        } else {
-            decorView.setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-            );
-        }
-    }
-
+    // ── LIFECYCLE ────────────────────────────────────────────────
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemUI(); // Pulihkan kiosk mode jika sempat keluar
+        if (hasFocus) hideSystemUI();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         hideSystemUI();
+        handler.removeCallbacks(immersiveRunnable);
+        handler.postDelayed(immersiveRunnable, 500);
     }
 
-    // ── Utility ──────────────────────────────────────────────
-    private String getDomain(String url) {
-        try {
-            java.net.URL u = new java.net.URL(url);
-            return u.getProtocol() + "://" + u.getHost();
-        } catch (Exception e) {
-            return url;
-        }
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        handler.removeCallbacks(immersiveRunnable);
+        if (webView != null) webView.destroy();
     }
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
-        webView.saveState(outState);
+        if (webView != null) webView.saveState(outState);
     }
 
     @Override
     protected void onRestoreInstanceState(Bundle savedInstanceState) {
         super.onRestoreInstanceState(savedInstanceState);
-        webView.restoreState(savedInstanceState);
+        if (webView != null) webView.restoreState(savedInstanceState);
+    }
+
+    private String getDomain(String url) {
+        try {
+            java.net.URL u = new java.net.URL(url);
+            return u.getProtocol() + "://" + u.getHost();
+        } catch (Exception e) { return url; }
     }
 }
