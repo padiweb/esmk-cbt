@@ -4,15 +4,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Blokir screenshot & screen recording -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
-    <!-- Do Not Disturb -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-    <!-- Deteksi & tutup floating window -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- Cegah task switcher -->
-    <uses-permission android:name="android.permission.REORDER_TASKS" />
 
     <application
         android:allowBackup="false"
@@ -41,8 +35,7 @@
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:excludeFromRecents="true"
-            android:noHistory="false" />
+            android:excludeFromRecents="true" />
 
         <activity
             android:name=".SettingsActivity"
@@ -52,8 +45,7 @@
 
         <service
             android:name=".GuardService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:exported="false" />
 
     </application>
 
