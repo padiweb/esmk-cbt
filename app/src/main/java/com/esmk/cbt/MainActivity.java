@@ -126,11 +126,15 @@ public class MainActivity extends AppCompatActivity {
 
     // ── GUARD SERVICE ────────────────────────────────────────────
     private void startGuardService() {
-        Intent serviceIntent = new Intent(this, GuardService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent);
-        } else {
-            startService(serviceIntent);
+        try {
+            Intent serviceIntent = new Intent(this, GuardService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
+        } catch (Exception e) {
+            // Lanjut meski GuardService gagal — keamanan dasar tetap aktif
         }
     }
 
