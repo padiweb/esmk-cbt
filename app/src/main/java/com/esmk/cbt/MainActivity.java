@@ -2,14 +2,9 @@ package com.esmk.cbt;
 
 import android.annotation.SuppressLint;
 import android.app.AlertDialog;
-import android.app.NotificationManager;
-import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
-import android.media.AudioManager;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -27,9 +22,6 @@ import android.webkit.WebViewClient;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.view.WindowCompat;
-import androidx.core.view.WindowInsetsCompat;
-import androidx.core.view.WindowInsetsControllerCompat;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -39,33 +31,24 @@ public class MainActivity extends AppCompatActivity {
     private String serverUrl;
     private final Handler handler = new Handler();
     private Runnable immersiveRunnable;
-    private BroadcastReceiver violationReceiver;
+    private Runnable appCheckRunnable;
     private boolean isExamActive = false;
 
     private static final String DEFAULT_PIN = "1234";
     private int backPressCount = 0;
     private long lastBackPress = 0;
+    private long lastViolTime = 0;
 
-    @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // ── Fullscreen + Screenshot blocked ────────────────────
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-
-        // ── FLAG_SECURE: Blokir screenshot & screen recording ───
-        // Ini yang paling penting — layar akan hitam saat di-screenshot
-        // atau saat di-record oleh aplikasi manapun
-        getWindow().setFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN |
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_FULLSCREEN |
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
-            WindowManager.LayoutParams.FLAG_SECURE
-        );
+        int flags = WindowManager.LayoutParams.FLAG_FULLSCREEN
+                  | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                  | WindowManager.LayoutParams.FLAG_SECURE; // Blokir screenshot
+        getWindow().setFlags(flags, flags);
 
         setContentView(R.layout.activity_main);
 
@@ -76,43 +59,15 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
         serverUrl = prefs.getString("server_url", "");
 
-        hideSystemUI();
-        startImmersivePolling();
-        registerViolationReceiver();
-        startGuardService();
-        muteNotifications();
         setupWebView();
         loadUrl();
-
-        isExamActive = true;
+        hideSystemUI();
+        startImmersivePolling();
     }
 
-    // ── IMMERSIVE POLLING ────────────────────────────────────────
-    private void startImmersivePolling() {
-        immersiveRunnable = new Runnable() {
-            @Override
-            public void run() {
-                hideSystemUI();
-                handler.postDelayed(this, 500);
-            }
-        };
-        handler.postDelayed(immersiveRunnable, 500);
-    }
-
+    // ── IMMERSIVE — nav bar & status bar tersembunyi ────────────
     private void hideSystemUI() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-            WindowInsetsControllerCompat ctrl =
-                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-            if (ctrl != null) {
-                ctrl.hide(WindowInsetsCompat.Type.systemBars());
-                ctrl.hide(WindowInsetsCompat.Type.navigationBars());
-                ctrl.hide(WindowInsetsCompat.Type.statusBars());
-                ctrl.setSystemBarsBehavior(
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                );
-            }
-        } else {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -124,87 +79,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ── GUARD SERVICE ────────────────────────────────────────────
-    private void startGuardService() {
-        try {
-            Intent serviceIntent = new Intent(this, GuardService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent);
-            } else {
-                startService(serviceIntent);
-            }
-        } catch (Exception e) {
-            // Lanjut meski GuardService gagal — keamanan dasar tetap aktif
-        }
-    }
-
-    private void stopGuardService() {
-        stopService(new Intent(this, GuardService.class));
-    }
-
-    // ── VIOLATION RECEIVER ───────────────────────────────────────
-    // Menerima broadcast dari GuardService saat ada pelanggaran
-    private void registerViolationReceiver() {
-        violationReceiver = new BroadcastReceiver() {
+    // Polling setiap 500ms — nav bar yang sempat muncul langsung hilang
+    private void startImmersivePolling() {
+        immersiveRunnable = new Runnable() {
             @Override
-            public void onReceive(Context context, Intent intent) {
-                String reason = intent.getStringExtra("reason");
-                if (reason != null) {
-                    // Kirim ke web ujian sebagai pelanggaran
-                    reportViolationToWeb(reason);
-                }
+            public void run() {
+                hideSystemUI();
+                handler.postDelayed(this, 500);
             }
         };
-        IntentFilter filter = new IntentFilter("com.esmk.cbt.VIOLATION");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(violationReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(violationReceiver, filter);
-        }
+        handler.postDelayed(immersiveRunnable, 500);
     }
 
-    // Injeksi JavaScript ke WebView untuk melaporkan pelanggaran ke server
-    private void reportViolationToWeb(String reason) {
-        if (webView == null || !isExamActive) return;
-        String safeReason = reason.replace("'", "\\'").replace("\n", " ");
-        String js = "javascript:(function(){" +
-            "if(typeof triggerViolation === 'function'){" +
-            "  triggerViolation('" + safeReason + "');" +
-            "}" +
-            "})();";
-        runOnUiThread(() -> webView.loadUrl(js));
-    }
-
-    // ── MUTE NOTIFIKASI ──────────────────────────────────────────
-    private void muteNotifications() {
-        try {
-            NotificationManager nm =
-                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm != null && nm.isNotificationPolicyAccessGranted()) {
-                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE);
-            }
-            // Matikan suara & getar
-            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                am.setRingerMode(AudioManager.RINGER_MODE_SILENT);
-            }
-        } catch (Exception e) {
-            // Ignore jika tidak ada izin
-        }
-    }
-
-    private void restoreNotifications() {
-        try {
-            NotificationManager nm =
-                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm != null && nm.isNotificationPolicyAccessGranted()) {
-                nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL);
-            }
-        } catch (Exception e) {
-            // Ignore
-        }
-    }
-
+    // ── WEBVIEW SETUP ───────────────────────────────────────────
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         WebSettings ws = webView.getSettings();
@@ -216,16 +103,18 @@ public class MainActivity extends AppCompatActivity {
         ws.setBuiltInZoomControls(false);
         ws.setDisplayZoomControls(false);
         ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // Penanda APK — dibaca ujian.php untuk skip fullscreen gate
         ws.setUserAgentString(ws.getUserAgentString() + " ESMK-CBT/1.0");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                String url = request.getUrl().toString();
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                String url = req.getUrl().toString();
+                // Izinkan hanya URL dalam domain server ujian
                 if (url.startsWith(serverUrl) || url.startsWith(getDomain(serverUrl))) {
                     return false;
                 }
-                return true;
+                return true; // Blokir URL luar
             }
 
             @Override
@@ -238,27 +127,28 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
                 hideSystemUI();
+                isExamActive = true;
             }
 
             @Override
-            public void onReceivedError(WebView view, int errorCode,
-                                        String description, String failingUrl) {
+            public void onReceivedError(WebView view, int code,
+                                        String desc, String failingUrl) {
                 progressBar.setVisibility(View.GONE);
                 showError();
             }
 
             @Override
-            public void onReceivedSslError(WebView view, SslErrorHandler handler,
-                                           SslError error) {
-                handler.proceed();
+            public void onReceivedSslError(WebView view,
+                                           SslErrorHandler handler, SslError error) {
+                handler.proceed(); // Izinkan self-signed untuk server lokal
             }
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
-            public void onProgressChanged(WebView view, int newProgress) {
-                progressBar.setProgress(newProgress);
-                if (newProgress == 100) progressBar.setVisibility(View.GONE);
+            public void onProgressChanged(WebView view, int p) {
+                progressBar.setProgress(p);
+                if (p == 100) progressBar.setVisibility(View.GONE);
             }
         });
     }
@@ -271,28 +161,30 @@ public class MainActivity extends AppCompatActivity {
 
     private void showError() {
         tvError.setVisibility(View.VISIBLE);
-        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\n" +
-            "Pastikan:\n• HP terhubung ke jaringan sekolah\n• Server ujian aktif\n\n" +
-            "Ketuk 5x untuk coba lagi.");
-        final int[] tapCount = {0};
+        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\n"
+            + "Pastikan:\n• HP terhubung ke jaringan sekolah\n"
+            + "• Server ujian aktif\n\nKetuk 5x untuk coba lagi.");
+        final int[] tap = {0};
         final long[] lastTap = {0};
         tvError.setOnClickListener(v -> {
             long now = System.currentTimeMillis();
-            tapCount[0] = (now - lastTap[0] < 1000) ? tapCount[0] + 1 : 1;
+            tap[0] = (now - lastTap[0] < 1000) ? tap[0] + 1 : 1;
             lastTap[0] = now;
-            if (tapCount[0] >= 5) { tapCount[0] = 0; loadUrl(); }
+            if (tap[0] >= 5) { tap[0] = 0; loadUrl(); }
         });
     }
 
-    // ── DETEKSI KELUAR HALAMAN (onPause) ─────────────────────────
-    // Dipanggil saat: Home ditekan, Recent Apps, notifikasi, dll
-    @Override
-    protected void onPause() {
-        super.onPause();
-        if (isExamActive) {
-            // Laporkan pelanggaran ke web
-            reportViolationToWeb("Keluar Halaman Ujian (Tombol Home/Recent)");
-        }
+    // ── KIRIM PELANGGARAN KE WEB ────────────────────────────────
+    private void reportViolation(String reason) {
+        if (!isExamActive || webView == null) return;
+        long now = System.currentTimeMillis();
+        if (now - lastViolTime < 3000) return; // cooldown 3 detik
+        lastViolTime = now;
+        String safe = reason.replace("'", "\\'");
+        final String js = "javascript:(function(){" +
+            "if(typeof triggerViolation==='function'){triggerViolation('" + safe + "');}" +
+            "})();";
+        runOnUiThread(() -> webView.loadUrl(js));
     }
 
     // ── TOMBOL FISIK ─────────────────────────────────────────────
@@ -311,8 +203,6 @@ public class MainActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
             case KeyEvent.KEYCODE_CAMERA:
-            case KeyEvent.KEYCODE_FOCUS:
-            case KeyEvent.KEYCODE_POWER:
                 return true;
             default:
                 return super.onKeyDown(keyCode, event);
@@ -339,23 +229,41 @@ public class MainActivity extends AppCompatActivity {
         backPressCount = (now - lastBackPress < 3000) ? backPressCount + 1 : 1;
         lastBackPress = now;
         if (backPressCount >= 5) { backPressCount = 0; showAdminPinDialog(); }
+        else { reportViolation("Tombol Kembali Ditekan"); }
     }
 
+    // ── DETEKSI KELUAR HALAMAN ───────────────────────────────────
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (isExamActive) {
+            reportViolation("Keluar Halaman Ujian");
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        hideSystemUI();
+        handler.removeCallbacks(immersiveRunnable);
+        handler.postDelayed(immersiveRunnable, 500);
+    }
+
+    // ── ADMIN MENU ───────────────────────────────────────────────
     private void showAdminPinDialog() {
         android.widget.EditText input = new android.widget.EditText(this);
-        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER |
-                           android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        input.setHint("Masukkan PIN Pengawas");
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+            | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        input.setHint("PIN Pengawas");
         input.setPadding(40, 20, 40, 20);
 
         new AlertDialog.Builder(this)
             .setTitle("🔐 Akses Pengawas")
-            .setMessage("Masukkan PIN untuk mengakses menu pengawas.")
             .setView(input)
-            .setPositiveButton("Masuk", (dialog, which) -> {
+            .setPositiveButton("Masuk", (d, w) -> {
                 String pin = input.getText().toString();
-                SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
-                if (pin.equals(prefs.getString("admin_pin", DEFAULT_PIN))) {
+                SharedPreferences p = getSharedPreferences("esmk_config", MODE_PRIVATE);
+                if (pin.equals(p.getString("admin_pin", DEFAULT_PIN))) {
                     showAdminMenu();
                 } else {
                     new AlertDialog.Builder(this)
@@ -368,15 +276,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showAdminMenu() {
-        String[] menu = {
-            "⚙️ Ubah Pengaturan (URL, Nama, PIN)",
-            "🔄 Reload Halaman",
-            "🚪 Keluar Aplikasi"
-        };
         new AlertDialog.Builder(this)
             .setTitle("Menu Pengawas")
-            .setItems(menu, (dialog, which) -> {
-                switch (which) {
+            .setItems(new String[]{
+                "⚙️ Ubah Pengaturan",
+                "🔄 Reload Halaman",
+                "🚪 Keluar Aplikasi"
+            }, (d, w) -> {
+                switch (w) {
                     case 0:
                         isExamActive = false;
                         startActivity(new Intent(this, SettingsActivity.class));
@@ -386,8 +293,6 @@ public class MainActivity extends AppCompatActivity {
                         break;
                     case 2:
                         isExamActive = false;
-                        restoreNotifications();
-                        stopGuardService();
                         handler.removeCallbacks(immersiveRunnable);
                         finishAffinity();
                         System.exit(0);
@@ -404,35 +309,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
-        hideSystemUI();
-        handler.removeCallbacks(immersiveRunnable);
-        handler.postDelayed(immersiveRunnable, 500);
-        isExamActive = true;
-    }
-
-    @Override
     protected void onDestroy() {
         super.onDestroy();
         isExamActive = false;
         handler.removeCallbacks(immersiveRunnable);
-        try {
-            unregisterReceiver(violationReceiver);
-        } catch (Exception e) { /* ignore */ }
-        if (webView != null) webView.destroy();
+        if (webView != null) { webView.destroy(); webView = null; }
     }
 
     @Override
-    protected void onSaveInstanceState(Bundle outState) {
-        super.onSaveInstanceState(outState);
-        if (webView != null) webView.saveState(outState);
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (webView != null) webView.saveState(out);
     }
 
     @Override
-    protected void onRestoreInstanceState(Bundle savedInstanceState) {
-        super.onRestoreInstanceState(savedInstanceState);
-        if (webView != null) webView.restoreState(savedInstanceState);
+    protected void onRestoreInstanceState(Bundle saved) {
+        super.onRestoreInstanceState(saved);
+        if (webView != null) webView.restoreState(saved);
     }
 
     private String getDomain(String url) {
