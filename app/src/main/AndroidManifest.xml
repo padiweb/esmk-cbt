@@ -3,10 +3,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="false"
@@ -42,10 +39,6 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:excludeFromRecents="true" />
-
-        <service
-            android:name=".GuardService"
-            android:exported="false" />
 
     </application>
 
