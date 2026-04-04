@@ -2,316 +2,177 @@ package com.esmk.cbt;
 
 import android.annotation.SuppressLint;
 import android.app.AlertDialog;
-import android.content.Intent;
-import android.content.SharedPreferences;
-import android.graphics.Bitmap;
-import android.net.http.SslError;
-import android.os.Build;
+import android.content.Context;
 import android.os.Bundle;
-import android.os.Handler;
 import android.view.KeyEvent;
 import android.view.View;
-import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.ProgressBar;
-import android.widget.TextView;
+import android.widget.Toast;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
-    private ProgressBar progressBar;
-    private TextView tvError;
-    private String serverUrl;
-    private final Handler handler = new Handler();
-    private Runnable immersiveRunnable;
-    private boolean isExamActive = false;
-    private long lastViolTime = 0;
+    private static final String TARGET_URL = "https://ujian.padiweb.my.id/ujian/login";
+    private static final String ALLOWED_DOMAIN = "ujian.padiweb.my.id";
+    private static final String PIN_ADMIN = "1234";
 
-    private static final String DEFAULT_PIN = "1234";
-    private int backPressCount = 0;
-    private long lastBackPress = 0;
+    private int backCount = 0;
+    private long lastBackTime = 0;
+    private static final int BACK_THRESHOLD = 5;
+    private static final long BACK_WINDOW_MS = 3000;
 
+    @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        // Android 14+ — WindowInsetsController untuk full screen
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
 
-        // FLAG_SECURE: blokir screenshot & screen recording
-        // FLAG_KEEP_SCREEN_ON: layar tidak mati saat ujian
-        getWindow().setFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN |
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_FULLSCREEN |
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
-            WindowManager.LayoutParams.FLAG_SECURE
-        );
+        webView = new WebView(this);
+        setContentView(webView);
 
-        setContentView(R.layout.activity_main);
+        // Full screen Android 14+ cara baru
+        WindowInsetsController controller = getWindow().getInsetsController();
+        if (controller != null) {
+            controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+            controller.setSystemBarsBehavior(
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            );
+        }
 
-        webView     = findViewById(R.id.webview);
-        progressBar = findViewById(R.id.progress_bar);
-        tvError     = findViewById(R.id.tv_error);
+        // Setup WebView
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setUserAgentString(settings.getUserAgentString() + " ESMK-CBT/1.0");
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
 
-        SharedPreferences prefs = getSharedPreferences("esmk_config", MODE_PRIVATE);
-        serverUrl = prefs.getString("server_url", "");
-
-        hideSystemUI();
-        startImmersivePolling();
-        setupWebView();
-        loadUrl();
-    }
-
-    // ── IMMERSIVE MODE ──────────────────────────────────────────
-    // Nav bar & status bar tersembunyi, polling setiap 500ms
-    // agar langsung hilang jika sempat muncul
-    private void hideSystemUI() {
-        getWindow().getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-            | View.SYSTEM_UI_FLAG_FULLSCREEN
-        );
-    }
-
-    private void startImmersivePolling() {
-        immersiveRunnable = new Runnable() {
-            @Override public void run() {
-                hideSystemUI();
-                handler.postDelayed(this, 500);
-            }
-        };
-        handler.postDelayed(immersiveRunnable, 500);
-    }
-
-    // ── WEBVIEW ─────────────────────────────────────────────────
-    @SuppressLint("SetJavaScriptEnabled")
-    private void setupWebView() {
-        WebSettings ws = webView.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setDomStorageEnabled(true);
-        ws.setDatabaseEnabled(true);
-        ws.setLoadWithOverviewMode(true);
-        ws.setUseWideViewPort(true);
-        ws.setBuiltInZoomControls(false);
-        ws.setDisplayZoomControls(false);
-        ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-        // Penanda APK → ujian.php skip fullscreen gate
-        ws.setUserAgentString(ws.getUserAgentString() + " ESMK-CBT/1.0");
-
+        webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
-                String url = req.getUrl().toString();
-                if (url.startsWith(serverUrl) || url.startsWith(getDomain(serverUrl)))
-                    return false;
-                return true; // Blokir URL di luar domain ujian
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                String url = request.getUrl().toString();
+                return !url.contains(ALLOWED_DOMAIN);
             }
+
             @Override
-            public void onPageStarted(WebView v, String url, Bitmap f) {
-                progressBar.setVisibility(View.VISIBLE);
-                tvError.setVisibility(View.GONE);
-            }
-            @Override
-            public void onPageFinished(WebView v, String url) {
-                progressBar.setVisibility(View.GONE);
-                hideSystemUI();
-                isExamActive = true;
-            }
-            @Override
-            public void onReceivedError(WebView v, int code, String desc, String url) {
-                progressBar.setVisibility(View.GONE);
-                showError();
-            }
-            @Override
-            public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) {
-                h.proceed(); // Izinkan self-signed cert (server lokal)
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                view.evaluateJavascript(
+                    "document.addEventListener('contextmenu',function(e){e.preventDefault();});",
+                    null
+                );
             }
         });
 
-        webView.setWebChromeClient(new WebChromeClient() {
+        webView.loadUrl(TARGET_URL);
+
+        // Android 14+ — OnBackInvokedCallback (menggantikan onBackPressed yang deprecated)
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            () -> handleBack()
+        );
+
+        // Polling immersive setiap 500ms
+        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
             @Override
-            public void onProgressChanged(WebView v, int p) {
-                progressBar.setProgress(p);
-                if (p == 100) progressBar.setVisibility(View.GONE);
+            public void run() {
+                WindowInsetsController c = getWindow().getInsetsController();
+                if (c != null) {
+                    c.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                }
+                new android.os.Handler(getMainLooper()).postDelayed(this, 500);
             }
-        });
+        }, 500);
     }
 
-    private void loadUrl() {
-        if (serverUrl.isEmpty()) { showError(); return; }
-        tvError.setVisibility(View.GONE);
-        webView.loadUrl(serverUrl);
-    }
-
-    private void showError() {
-        tvError.setVisibility(View.VISIBLE);
-        tvError.setText("⚠️ Tidak dapat terhubung ke server.\n\n"
-            + "Pastikan:\n• HP terhubung ke jaringan sekolah\n"
-            + "• Server ujian aktif\n\nKetuk 5x untuk coba lagi.");
-        final int[] tap = {0};
-        final long[] lt = {0};
-        tvError.setOnClickListener(v -> {
-            long now = System.currentTimeMillis();
-            tap[0] = (now - lt[0] < 1000) ? tap[0] + 1 : 1;
-            lt[0] = now;
-            if (tap[0] >= 5) { tap[0] = 0; loadUrl(); }
-        });
-    }
-
-    // ── KIRIM PELANGGARAN KE SERVER ─────────────────────────────
-    private void reportViolation(String reason) {
-        if (!isExamActive || webView == null) return;
+    private void handleBack() {
         long now = System.currentTimeMillis();
-        if (now - lastViolTime < 3000) return;
-        lastViolTime = now;
-        String safe = reason.replace("'", "\\'");
-        runOnUiThread(() -> webView.loadUrl(
-            "javascript:(function(){if(typeof triggerViolation==='function')" +
-            "{triggerViolation('" + safe + "');}})();"
-        ));
+        if (now - lastBackTime > BACK_WINDOW_MS) {
+            backCount = 0;
+        }
+        lastBackTime = now;
+        backCount++;
+
+        if (backCount >= BACK_THRESHOLD) {
+            backCount = 0;
+            showAdminPin();
+        }
     }
 
-    // ── TOMBOL FISIK ─────────────────────────────────────────────
+    private void showAdminPin() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setInputType(
+            android.text.InputType.TYPE_CLASS_NUMBER |
+            android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        );
+        input.setHint("PIN Admin");
+
+        new AlertDialog.Builder(this)
+            .setTitle("Akses Admin")
+            .setMessage("Masukkan PIN untuk keluar dari mode ujian:")
+            .setView(input)
+            .setPositiveButton("OK", (dialog, which) -> {
+                if (PIN_ADMIN.equals(input.getText().toString())) {
+                    finish();
+                } else {
+                    Toast.makeText(this, "PIN salah!", Toast.LENGTH_SHORT).show();
+                }
+            })
+            .setNegativeButton("Batal", null)
+            .show();
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         switch (keyCode) {
-            case KeyEvent.KEYCODE_BACK:
-                handleBackPress(); return true;
             case KeyEvent.KEYCODE_HOME:
             case KeyEvent.KEYCODE_APP_SWITCH:
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_SEARCH:
             case KeyEvent.KEYCODE_ASSIST:
-            case KeyEvent.KEYCODE_VOICE_ASSIST:
+            case KeyEvent.KEYCODE_CAMERA:
             case KeyEvent.KEYCODE_VOLUME_UP:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
-            case KeyEvent.KEYCODE_CAMERA:
                 return true;
-            default: return super.onKeyDown(keyCode, event);
         }
+        return super.onKeyDown(keyCode, event);
     }
 
-    @Override
-    public boolean onKeyUp(int keyCode, KeyEvent event) {
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_HOME:
-            case KeyEvent.KEYCODE_APP_SWITCH:
-            case KeyEvent.KEYCODE_MENU:
-            case KeyEvent.KEYCODE_ASSIST:
-            case KeyEvent.KEYCODE_VOICE_ASSIST:
-                return true;
-            default: return super.onKeyUp(keyCode, event);
-        }
-    }
-
-    private void handleBackPress() {
-        long now = System.currentTimeMillis();
-        backPressCount = (now - lastBackPress < 3000) ? backPressCount + 1 : 1;
-        lastBackPress  = now;
-        if (backPressCount >= 5) { backPressCount = 0; showAdminPinDialog(); }
-        else { reportViolation("Tombol Kembali Ditekan"); }
-    }
-
-    // ── DETEKSI KELUAR HALAMAN ───────────────────────────────────
     @Override
     protected void onPause() {
         super.onPause();
-        if (isExamActive) reportViolation("Keluar Halaman Ujian");
+        if (webView != null) {
+            webView.evaluateJavascript(
+                "if(typeof window.onAppPause==='function') window.onAppPause();",
+                null
+            );
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        hideSystemUI();
-        handler.removeCallbacks(immersiveRunnable);
-        handler.postDelayed(immersiveRunnable, 500);
-    }
-
-    // ── ADMIN PIN & MENU ─────────────────────────────────────────
-    private void showAdminPinDialog() {
-        android.widget.EditText et = new android.widget.EditText(this);
-        et.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
-            | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        et.setHint("PIN Pengawas");
-        et.setPadding(48, 24, 48, 24);
-
-        new AlertDialog.Builder(this)
-            .setTitle("🔐 Akses Pengawas")
-            .setMessage("Masukkan PIN untuk mengakses menu pengawas.")
-            .setView(et)
-            .setPositiveButton("Masuk", (d, w) -> {
-                String pin = et.getText().toString();
-                SharedPreferences p = getSharedPreferences("esmk_config", MODE_PRIVATE);
-                if (pin.equals(p.getString("admin_pin", DEFAULT_PIN))) showAdminMenu();
-                else new AlertDialog.Builder(this)
-                    .setTitle("❌ PIN Salah").setMessage("PIN tidak sesuai.")
-                    .setPositiveButton("OK", null).show();
-            })
-            .setNegativeButton("Batal", null).show();
-    }
-
-    private void showAdminMenu() {
-        new AlertDialog.Builder(this)
-            .setTitle("Menu Pengawas")
-            .setItems(new String[]{
-                "⚙️ Ubah Pengaturan",
-                "🔄 Reload Halaman",
-                "🚪 Keluar Aplikasi"
-            }, (d, w) -> {
-                switch (w) {
-                    case 0:
-                        isExamActive = false;
-                        startActivity(new Intent(this, SettingsActivity.class)); break;
-                    case 1:
-                        webView.reload(); break;
-                    case 2:
-                        isExamActive = false;
-                        handler.removeCallbacks(immersiveRunnable);
-                        finishAffinity(); System.exit(0); break;
-                }
-            }).show();
-    }
-
-    // ── LIFECYCLE ────────────────────────────────────────────────
-    @Override
-    public void onWindowFocusChanged(boolean hasFocus) {
-        super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemUI();
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        isExamActive = false;
-        handler.removeCallbacks(immersiveRunnable);
-        if (webView != null) { webView.destroy(); webView = null; }
-    }
-
-    @Override
-    protected void onSaveInstanceState(Bundle out) {
-        super.onSaveInstanceState(out);
-        if (webView != null) webView.saveState(out);
-    }
-
-    @Override
-    protected void onRestoreInstanceState(Bundle saved) {
-        super.onRestoreInstanceState(saved);
-        if (webView != null) webView.restoreState(saved);
-    }
-
-    private String getDomain(String url) {
-        try { java.net.URL u = new java.net.URL(url); return u.getProtocol()+"://"+u.getHost(); }
-        catch (Exception e) { return url; }
+        WindowInsetsController controller = getWindow().getInsetsController();
+        if (controller != null) {
+            controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+            controller.setSystemBarsBehavior(
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            );
+        }
     }
 }
